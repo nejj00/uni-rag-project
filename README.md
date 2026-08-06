@@ -4,6 +4,8 @@ A two-part Retrieval-Augmented Generation system built for the *Information Retr
 
 Full write-up and experiment results: [`presentation/IRSE-slides-r1035493.pdf`](presentation/IRSE-slides-r1035493.pdf).
 
+*All generation — answers, query rewrites, and HyDE paragraphs — was produced by `Mistral-7B-Instruct-v0.2` throughout both parts.*
+
 ## Part 1 — Cooking Recipes
 
 Classical, word-level RAG pipeline:
