@@ -8,6 +8,7 @@ in dense retrieval pipelines.
 from typing import List, Tuple
 
 import config
+from vector_db import to_query_vector, chunk_point_id
 
 
 class DocumentChunker:
@@ -55,30 +56,38 @@ class DocumentChunker:
 
 
 class ChunkRetrieval:
-    """Manages chunked document retrieval with FAISS indices."""
+    """Manages chunked document retrieval via a Qdrant vector store."""
 
-    def __init__(self, embedding_manager, chunker: DocumentChunker = None):
+    COLLECTION_NAME = "chunks"
+
+    def __init__(self, embedder, vector_store, chunker: DocumentChunker = None):
         """
         Initialize chunk retrieval manager.
 
         Args:
-            embedding_manager: EmbeddingManager instance for encoding.
+            embedder: Embedder instance for encoding text.
+            vector_store: VectorStore instance for indexing/search.
             chunker: DocumentChunker instance. If None, creates one with config values.
         """
-        self.embedding_manager = embedding_manager
+        self.embedder = embedder
+        self.vector_store = vector_store
         self.chunker = chunker or DocumentChunker()
-        self.chunk_map = []  # Maps chunk_id -> doc_id
-        self.chunks = []  # List of chunk texts
 
     def build_chunk_index(self, anthology_sample) -> None:
         """
         Build chunk index for the anthology sample.
 
         Steps:
-        1. Chunk each document's full text
-        2. Track which doc each chunk belongs to
-        3. Encode all chunks
-        4. Build FAISS index
+        1. Chunk each document's full text, tracking which doc each chunk came from
+        2. Encode all chunks
+        3. Upload to Qdrant, storing each chunk's source acl_id, its position
+           within that document, and its raw text as payload (replaces the
+           old in-memory chunk_map -> the DB is the single source of truth
+           for the chunk -> document mapping, and also lets you fetch a
+           document's chunks back out - see vector_db for filtered scroll).
+           Each point's id is derived from (acl_id, position within its own
+           document), not global chunk position, so re-ingestion is
+           idempotent even if the sample composition/order changes between runs.
 
         Args:
             anthology_sample: HuggingFace dataset of documents.
@@ -86,39 +95,45 @@ class ChunkRetrieval:
         if config.VERBOSE:
             print("Building chunk index...")
 
-        # Chunk all documents
-        for i, doc in enumerate(anthology_sample):
+        chunks = []
+        chunk_acl_ids = []
+        chunk_positions = []
+        chunk_ids = []
+
+        for doc in anthology_sample:
             full_text = doc.get("full_text", "") or ""
+            acl_id = doc["acl_id"]
 
-            chunks = self.chunker.chunk(full_text)
-
-            for chunk in chunks:
-                self.chunks.append(chunk)
-                self.chunk_map.append(i)
+            for position, chunk in enumerate(self.chunker.chunk(full_text)):
+                chunks.append(chunk)
+                chunk_acl_ids.append(acl_id)
+                chunk_positions.append(position)
+                chunk_ids.append(chunk_point_id(acl_id, position))
 
         if config.VERBOSE:
-            print(f"✓ Created {len(self.chunks)} chunks from {len(anthology_sample)} docs")
-
-        # Encode chunks
-        if config.VERBOSE:
+            print(f"✓ Created {len(chunks)} chunks from {len(anthology_sample)} docs")
             print("Encoding chunks...")
 
-        chunk_embeddings = self.embedding_manager.encode(
-            self.chunks, show_progress=True
-        )
+        chunk_embeddings = self.embedder.encode(chunks, show_progress=True)
 
-        # Build FAISS index
-        self.embedding_manager.build_index(chunk_embeddings, strategy="chunks")
+        payloads = [
+            {"acl_id": acl_id, "position": position, "text": text}
+            for acl_id, position, text in zip(chunk_acl_ids, chunk_positions, chunks)
+        ]
+        self.vector_store.build_index(
+            self.COLLECTION_NAME, chunk_embeddings, payloads=payloads, ids=chunk_ids
+        )
 
         if config.VERBOSE:
             print(f"✓ Chunk retrieval ready!")
 
-    def retrieve(self, query_embedding, k: int = 10) -> Tuple[List[int], List[float]]:
+    def retrieve(self, query_embedding, k: int = 10) -> Tuple[List[str], List[float]]:
         """
         Retrieve top-k documents using chunk-aware aggregation.
 
         Steps:
-        1. Search FAISS for top chunks (5-10x k)
+        1. Search Qdrant for top chunks (5-10x k), resolving each hit
+           straight to its source document's acl_id via payload
         2. Aggregate scores per document (max pooling)
         3. Rank documents and return top-k
 
@@ -127,29 +142,26 @@ class ChunkRetrieval:
             k: Number of documents to return.
 
         Returns:
-            Tuple of (doc_indices, aggregated_scores).
+            Tuple of (acl_ids, aggregated_scores).
         """
         # Fetch more chunks than needed for aggregation
         chunks_to_fetch = max(k * 10, 50)
 
-        # Search FAISS chunk index
-        chunk_indices, chunk_scores = self.embedding_manager.search(
-            query_embedding, strategy="chunks", k=chunks_to_fetch
+        acl_id_hits, chunk_scores = self.vector_store.query_points(
+            self.COLLECTION_NAME,
+            to_query_vector(query_embedding),
+            limit=chunks_to_fetch,
+            id_payload_key="acl_id",
         )
 
         # Aggregate scores per document (max pooling)
         doc_scores = {}
-        for chunk_idx, chunk_score in zip(chunk_indices, chunk_scores):
-            if chunk_idx == -1:
-                continue
-
-            doc_idx = self.chunk_map[chunk_idx]
-
-            if doc_idx not in doc_scores:
-                doc_scores[doc_idx] = chunk_score
+        for acl_id, chunk_score in zip(acl_id_hits, chunk_scores):
+            if acl_id not in doc_scores:
+                doc_scores[acl_id] = chunk_score
             else:
                 # Max pooling: keep highest chunk score for each doc
-                doc_scores[doc_idx] = max(doc_scores[doc_idx], chunk_score)
+                doc_scores[acl_id] = max(doc_scores[acl_id], chunk_score)
 
         # Rank documents
         ranked_docs = sorted(

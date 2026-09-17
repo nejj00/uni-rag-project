@@ -8,7 +8,8 @@ import json
 
 import config
 from data_loader import ACLDataLoader, load_all_data
-from embeddings import EmbeddingManager
+from embeddings import Embedder, build_dense_index
+from vector_db import VectorStore
 from prompt_builder import LLMGenerator
 from query_augmentation import QueryAugmenter, QueryExpander
 from evaluation import evaluate_all_combinations
@@ -38,9 +39,11 @@ def main():
     # ========== Step 2: Initialize Components ==========
     print("\n[Step 2] Initializing components...")
 
-    # Embedding manager
-    embedding_manager = EmbeddingManager()
-    embedding_manager.load_model()
+    # Embedder + vector store
+    embedder = Embedder()
+    embedder.load_model()
+
+    vector_store = VectorStore(url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY)
 
     # LLM generator
     llm_generator = LLMGenerator()
@@ -60,18 +63,14 @@ def main():
     print("  This may take a few minutes for larger datasets...")
 
     # Dense retrieval index
-    from embeddings import combine_acl_fields
-    
-    docs = [combine_acl_fields(doc) for doc in anthology_sample]
-    embeddings = embedding_manager.encode(docs, show_progress=True)
-    embedding_manager.build_index(embeddings, strategy="dense")
+    build_dense_index(anthology_sample, embedder, vector_store)
 
     # Chunk retrieval index
-    chunk_retrieval = ChunkRetrieval(embedding_manager)
+    chunk_retrieval = ChunkRetrieval(embedder, vector_store)
     chunk_retrieval.build_chunk_index(anthology_sample)
 
     # Hierarchical retrieval index
-    hierarchical_retrieval = HierarchicalRetrieval(embedding_manager)
+    hierarchical_retrieval = HierarchicalRetrieval(embedder, vector_store)
     hierarchical_retrieval.build_index(anthology_sample)
 
     print("✓ All indices built successfully!")
@@ -87,7 +86,8 @@ def main():
         
         evaluate_all_combinations(
             query_expander=query_expander,
-            embedding_manager=embedding_manager,
+            embedder=embedder,
+            vector_store=vector_store,
             chunk_retrieval=chunk_retrieval,
             hierarchical_retrieval=hierarchical_retrieval,
             queries_data=queries,
@@ -106,7 +106,8 @@ def main():
 
     rag_pipeline = RAGPipeline(
         anthology_sample=anthology_sample,
-        embedding_manager=embedding_manager,
+        embedder=embedder,
+        vector_store=vector_store,
         llm_generator=llm_generator,
         chunk_retrieval=chunk_retrieval,
         hierarchical_retrieval=hierarchical_retrieval,
@@ -184,7 +185,8 @@ def main():
     return {
         "anthology_sample": anthology_sample,
         "queries": queries,
-        "embedding_manager": embedding_manager,
+        "embedder": embedder,
+        "vector_store": vector_store,
         "llm_generator": llm_generator,
         "rag_pipeline": rag_pipeline,
         "results": results,

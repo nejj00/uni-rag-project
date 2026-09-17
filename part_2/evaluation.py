@@ -12,6 +12,7 @@ import numpy as np
 
 import config
 from query_augmentation import QueryExpander
+from vector_db import to_query_vector
 
 
 def evaluate_retriever(
@@ -96,8 +97,8 @@ def evaluate_retriever(
                 print(f"⚠️  Query {q_idx + 1}: No results retrieved")
             continue
 
-        # Map indices to ACL IDs
-        retrieved_ids = [anthology_sample[int(i)]["acl_id"] for i in doc_indices]
+        # Retrievers already return acl_ids directly (see vector_db.acl_id_to_point_id)
+        retrieved_ids = list(doc_indices)
 
         # Check hits
         hits = [1 if doc_id in gold_ids else 0 for doc_id in retrieved_ids]
@@ -395,7 +396,8 @@ def evaluate_augmentation_strategies(
 
 def evaluate_all_combinations(
     query_expander: QueryExpander,
-    embedding_manager,
+    embedder,
+    vector_store,
     chunk_retrieval,
     hierarchical_retrieval,
     queries_data: Dict[str, Any],
@@ -425,7 +427,8 @@ def evaluate_all_combinations(
 
     Args:
         query_expander: Initialized QueryExpander instance.
-        embedding_manager: EmbeddingManager with built indices.
+        embedder: Embedder instance for encoding queries.
+        vector_store: VectorStore instance with built collections.
         chunk_retrieval: ChunkRetrieval instance.
         hierarchical_retrieval: HierarchicalRetrieval instance.
         queries_data: Query data with gold judgments.
@@ -452,20 +455,21 @@ def evaluate_all_combinations(
     # Define all retrieval strategies
     retrieval_strategies = {
         "Dense": {
-            "retrieve_fn": lambda query_text, k_val: embedding_manager.search(
-                embedding_manager.encode([query_text], show_progress=False), "dense", k_val
+            "retrieve_fn": lambda query_text, k_val: vector_store.query_points(
+                "dense", to_query_vector(embedder.encode([query_text], show_progress=False)), limit=k_val,
+                id_payload_key="acl_id",
             ),
             "display_name": "Dense (Full-Document)"
         },
         "Chunks": {
             "retrieve_fn": lambda query_text, k_val: chunk_retrieval.retrieve(
-                embedding_manager.encode([query_text], show_progress=False), k_val
+                embedder.encode([query_text], show_progress=False), k_val
             ),
             "display_name": "Chunks (Overlapping Windows)"
         },
         "Hierarchical": {
             "retrieve_fn": lambda query_text, k_val: hierarchical_retrieval.retrieve(
-                query_text, embedding_manager.encode([query_text], show_progress=False), k_val
+                query_text, embedder.encode([query_text], show_progress=False), k_val
             ),
             "display_name": "Hierarchical (Two-Stage)"
         },
@@ -540,13 +544,13 @@ def evaluate_all_combinations(
                             all_indices_scores.append((indices, scores))
 
                         # Voting fusion: count occurrences of each document
+                        # (idx is an acl_id string, not an int - see vector_db.acl_id_to_point_id)
                         doc_votes = {}
                         doc_max_score = {}
                         for indices, scores in all_indices_scores:
                             for idx, score in zip(indices, scores):
-                                idx_int = int(idx)
-                                doc_votes[idx_int] = doc_votes.get(idx_int, 0) + 1
-                                doc_max_score[idx_int] = max(doc_max_score.get(idx_int, 0), score)
+                                doc_votes[idx] = doc_votes.get(idx, 0) + 1
+                                doc_max_score[idx] = max(doc_max_score.get(idx, 0), score)
 
                         # Sort by vote count, then by max score
                         sorted_docs = sorted(

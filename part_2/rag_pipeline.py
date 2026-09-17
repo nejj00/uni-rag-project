@@ -10,7 +10,8 @@ from typing import Dict, List, Any, Callable, Optional
 import numpy as np
 
 import config
-from embeddings import EmbeddingManager, combine_acl_fields
+from embeddings import Embedder, build_dense_index
+from vector_db import VectorStore, to_query_vector
 from chunking import ChunkRetrieval
 from hierarchical_retrieval import HierarchicalRetrieval
 from prompt_builder import build_prompt, LLMGenerator, ReferenceTracker
@@ -24,10 +25,13 @@ class RAGPipeline:
     integrated with an LLM for answer generation.
     """
 
+    DENSE_COLLECTION = "dense"
+
     def __init__(
         self,
         anthology_sample,
-        embedding_manager: EmbeddingManager,
+        embedder: Embedder,
+        vector_store: VectorStore,
         llm_generator: LLMGenerator,
         chunk_retrieval: ChunkRetrieval = None,
         hierarchical_retrieval: HierarchicalRetrieval = None,
@@ -40,7 +44,8 @@ class RAGPipeline:
 
         Args:
             anthology_sample: HuggingFace dataset of documents.
-            embedding_manager: EmbeddingManager instance.
+            embedder: Embedder instance for encoding text.
+            vector_store: VectorStore instance for indexing/search.
             llm_generator: LLMGenerator instance.
             chunk_retrieval: Pre-built ChunkRetrieval instance (optional).
             hierarchical_retrieval: Pre-built HierarchicalRetrieval instance (optional).
@@ -50,7 +55,9 @@ class RAGPipeline:
             top_k: Number of documents to retrieve. If None, uses config.RAG_TOP_K.
         """
         self.anthology_sample = anthology_sample
-        self.embedding_manager = embedding_manager
+        self.by_acl_id = {doc["acl_id"]: doc for doc in anthology_sample}
+        self.embedder = embedder
+        self.vector_store = vector_store
         self.llm_generator = llm_generator
         self.query_expander = query_expander
         self.retrieval_strategy = retrieval_strategy or config.DEFAULT_RETRIEVAL_STRATEGY
@@ -61,16 +68,24 @@ class RAGPipeline:
         self.hierarchical_retrieval = hierarchical_retrieval
 
     def _ensure_dense_index(self) -> None:
-        """Ensure dense document index exists."""
-        if "dense" in self.embedding_manager.indices:
+        """
+        Ensure dense document index exists.
+
+        Note: unlike the old in-memory FAISS index, this collection persists
+        in Qdrant across separate runs -- if it already exists (e.g. from a
+        previous run against the same anthology_sample), this skips straight
+        to using it instead of re-embedding everything. If anthology_sample
+        ever changes without the collection being cleared, this will silently
+        serve stale results, since there's nothing here checking the two are
+        still in sync.
+        """
+        if self.vector_store.collection_exists(self.DENSE_COLLECTION):
             return
 
         if config.VERBOSE:
             print("Building dense document index...")
 
-        docs = [combine_acl_fields(doc) for doc in self.anthology_sample]
-        embeddings = self.embedding_manager.encode(docs, show_progress=True)
-        self.embedding_manager.build_index(embeddings, strategy="dense")
+        build_dense_index(self.anthology_sample, self.embedder, self.vector_store, self.DENSE_COLLECTION)
 
     def _ensure_chunk_index(self) -> None:
         """Ensure chunked document index exists."""
@@ -80,7 +95,7 @@ class RAGPipeline:
         if config.VERBOSE:
             print("Building chunk index...")
 
-        self.chunk_retrieval = ChunkRetrieval(self.embedding_manager)
+        self.chunk_retrieval = ChunkRetrieval(self.embedder, self.vector_store)
         self.chunk_retrieval.build_chunk_index(self.anthology_sample)
 
     def _ensure_hierarchical_index(self) -> None:
@@ -91,12 +106,12 @@ class RAGPipeline:
         if config.VERBOSE:
             print("Building hierarchical retrieval index...")
 
-        self.hierarchical_retrieval = HierarchicalRetrieval(self.embedding_manager)
+        self.hierarchical_retrieval = HierarchicalRetrieval(self.embedder, self.vector_store)
         self.hierarchical_retrieval.build_index(self.anthology_sample)
 
     def _encode_query(self, query: str) -> np.ndarray:
         """Encode a query to embedding."""
-        return self.embedding_manager.encode([query], show_progress=False)
+        return self.embedder.encode([query], show_progress=False)
 
     def retrieve_dense(self, query: str, k: int = None) -> tuple:
         """Retrieve using full-document dense embeddings."""
@@ -105,7 +120,9 @@ class RAGPipeline:
 
         self._ensure_dense_index()
         query_emb = self._encode_query(query)
-        indices, scores = self.embedding_manager.search(query_emb, "dense", k)
+        indices, scores = self.vector_store.query_points(
+            self.DENSE_COLLECTION, to_query_vector(query_emb), limit=k, id_payload_key="acl_id"
+        )
         return indices, scores
 
     def retrieve_chunks(self, query: str, k: int = None) -> tuple:
@@ -234,7 +251,7 @@ class RAGPipeline:
     def generate_answer(
         self,
         query: str,
-        retrieved_indices: List[int],
+        retrieved_indices: List[str],
         strategy: str = None,
     ) -> str:
         """
@@ -242,7 +259,7 @@ class RAGPipeline:
 
         Args:
             query: Original question.
-            retrieved_indices: Indices of retrieved documents.
+            retrieved_indices: acl_ids of retrieved documents.
             strategy: Retrieval strategy (for logging). If None, uses self.retrieval_strategy.
 
         Returns:
@@ -256,7 +273,7 @@ class RAGPipeline:
 
         # Fetch document details
         retrieved_docs = [
-            self.anthology_sample[int(idx)] for idx in retrieved_indices
+            self.by_acl_id[acl_id] for acl_id in retrieved_indices
         ]
 
         # Generate answer with query and documents
@@ -333,7 +350,7 @@ class RAGPipeline:
             "expanded_queries": expanded_queries,
             "doc_indices": doc_indices,
             "retrieved_docs": [
-                self.anthology_sample[int(idx)] for idx in doc_indices
+                self.by_acl_id[acl_id] for acl_id in doc_indices
             ],
             "answer": answer,
             "valid_references": valid_refs,

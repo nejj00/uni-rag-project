@@ -155,3 +155,10 @@ EVAL_DETAILED_DIR.mkdir(exist_ok=True)
 # ============================================================================
 
 VERBOSE = False
+
+# ============================================================================
+# Vector Database (Qdrant) Configuration
+# ============================================================================
+
+QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
+QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY")  # None locally, required if you ever deploy with auth on

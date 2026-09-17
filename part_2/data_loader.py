@@ -175,6 +175,29 @@ class ACLDataLoader:
             print(f"{key.upper()}: {value}")
 
 
+def load_cached_sample() -> datasets.Dataset:
+    """
+    Load a previously cached anthology sample from disk, skipping the
+    800MB full corpus load + resample. Useful for quick local testing.
+
+    Returns:
+        The cached anthology sample dataset.
+
+    Raises:
+        FileNotFoundError: If no cached sample exists yet (run
+        ACLDataLoader().load_datasets() once to build it).
+    """
+    if not config.ANTHOLOGY_SAMPLE_PARQUET.exists():
+        raise FileNotFoundError(
+            f"No cached sample at {config.ANTHOLOGY_SAMPLE_PARQUET}. "
+            "Run ACLDataLoader().load_datasets() once to build it."
+        )
+
+    return datasets.load_dataset(
+        "parquet", data_files=str(config.ANTHOLOGY_SAMPLE_PARQUET)
+    )["train"]
+
+
 def load_all_data() -> tuple:
     """
     Convenience function to load both datasets and queries.

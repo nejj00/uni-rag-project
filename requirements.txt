@@ -42,4 +42,6 @@ jupyterlab
 
 # Part 2
 sentence-transformers
-faiss-cpu
+
+# Vector database
+qdrant-client

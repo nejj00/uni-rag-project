@@ -11,6 +11,7 @@ import re
 import numpy as np
 
 import config
+from vector_db import to_query_vector, acl_id_to_point_id
 
 
 class SectionExtractor:
@@ -130,22 +131,35 @@ class SectionExtractor:
 class HierarchicalRetrieval:
     """Two-stage retrieval: Abstract filter → Full-text semantic search."""
 
-    def __init__(self, embedding_manager):
+    ABSTRACTS_COLLECTION = "abstracts"
+    # Stage 1 candidate filtering below queries "dense", not ABSTRACTS_COLLECTION -
+    # that's carried over as-is from the original FAISS implementation, where
+    # retrieve() searched strategy="dense" even though build_index() populated
+    # an "abstracts" index. Preserved here rather than silently "fixed" during
+    # the migration, since it changes retrieval results. Means the abstracts
+    # collection built below currently isn't queried anywhere - worth deciding
+    # if that was intentional.
+    DENSE_COLLECTION = "dense"
+
+    def __init__(self, embedder, vector_store):
         """
         Initialize hierarchical retrieval.
 
         Args:
-            embedding_manager: EmbeddingManager instance for encoding.
+            embedder: Embedder instance for encoding.
+            vector_store: VectorStore instance for indexing/search.
         """
-        self.embedding_manager = embedding_manager
+        self.embedder = embedder
+        self.vector_store = vector_store
         self.section_extractor = SectionExtractor()
         self.anthology_sample = None
+        self.by_acl_id = {}
 
     def build_index(self, anthology_sample) -> None:
         """
         Build hierarchical retrieval index.
 
-        Stage 1: Build FAISS index on abstracts for fast filtering.
+        Stage 1: Build an abstract-only index for fast filtering.
         Stage 2: Store anthology sample for on-demand full-text section extraction.
 
         Args:
@@ -159,13 +173,17 @@ class HierarchicalRetrieval:
             print("  Stage 1: Building abstract index...")
 
         abstracts = [doc.get("abstract", "") or "" for doc in anthology_sample]
-        abstract_embeddings = self.embedding_manager.encode(
-            abstracts, show_progress=True
+        abstract_embeddings = self.embedder.encode(abstracts, show_progress=True)
+
+        ids = [acl_id_to_point_id(doc["acl_id"]) for doc in anthology_sample]
+        payloads = [{"acl_id": doc["acl_id"]} for doc in anthology_sample]
+        self.vector_store.build_index(
+            self.ABSTRACTS_COLLECTION, abstract_embeddings, payloads=payloads, ids=ids
         )
-        self.embedding_manager.build_index(abstract_embeddings, strategy="abstracts")
 
         # Stage 2: Store anthology for on-demand full-text extraction
         self.anthology_sample = anthology_sample
+        self.by_acl_id = {doc["acl_id"]: doc for doc in anthology_sample}
 
         if config.VERBOSE:
             print(f"✓ Hierarchical index built for {len(anthology_sample)} documents")
@@ -176,7 +194,7 @@ class HierarchicalRetrieval:
         query_embedding: np.ndarray,
         k: int = 5,
         top_candidates: int = None,
-    ) -> Tuple[List[int], List[float]]:
+    ) -> Tuple[List[str], List[float]]:
         """
         Two-stage retrieval: Filter candidates by abstract, then search full text.
 
@@ -188,7 +206,7 @@ class HierarchicalRetrieval:
                            If None, uses config.HIERARCHICAL_TOP_CANDIDATES.
 
         Returns:
-            Tuple of (doc_indices, scores).
+            Tuple of (acl_ids, scores).
         """
         if top_candidates is None:
             top_candidates = config.HIERARCHICAL_TOP_CANDIDATES
@@ -199,33 +217,29 @@ class HierarchicalRetrieval:
                 f"Stage 1: Filtering {len(self.anthology_sample)} papers by abstract..."
             )
 
-        candidate_indices, _ = self.embedding_manager.search(
-            query_embedding, strategy="dense", k=top_candidates
+        candidate_acl_ids, _ = self.vector_store.query_points(
+            self.DENSE_COLLECTION, to_query_vector(query_embedding), limit=top_candidates, id_payload_key="acl_id"
         )
 
         if config.VERBOSE:
-            print(f"Stage 2: Deep search in top-{len(candidate_indices)} papers...")
+            print(f"Stage 2: Deep search in top-{len(candidate_acl_ids)} papers...")
 
         # Stage 2: Semantic search in full text sections
         doc_scores = {}
 
-        for doc_idx in candidate_indices:
-            if doc_idx < 0:
-                continue
-
-            doc_idx = int(doc_idx)
-            doc = self.anthology_sample[doc_idx]
+        for acl_id in candidate_acl_ids:
+            doc = self.by_acl_id[acl_id]
             full_text = doc.get("full_text", "") or ""
 
             if not full_text or len(full_text) < 100:
-                doc_scores[doc_idx] = 0.0
+                doc_scores[acl_id] = 0.0
                 continue
 
             # Extract sections
             sections = self.section_extractor.extract_sections(full_text)
 
             if not sections:
-                doc_scores[doc_idx] = 0.0
+                doc_scores[acl_id] = 0.0
                 continue
 
             # Score each section
@@ -237,7 +251,7 @@ class HierarchicalRetrieval:
 
                 try:
                     # Encode section
-                    section_embedding = self.embedding_manager.encode(
+                    section_embedding = self.embedder.encode(
                         [section_text], show_progress=False, normalize=True
                     )
 
@@ -261,9 +275,9 @@ class HierarchicalRetrieval:
 
             # Aggregate section scores
             if section_scores:
-                doc_scores[doc_idx] = float(np.mean(section_scores))
+                doc_scores[acl_id] = float(np.mean(section_scores))
             else:
-                doc_scores[doc_idx] = 0.0
+                doc_scores[acl_id] = 0.0
 
         # Rank documents
         ranked_docs = sorted(
