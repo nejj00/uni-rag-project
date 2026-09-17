@@ -162,3 +162,24 @@ VERBOSE = False
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY")  # None locally, required if you ever deploy with auth on
+
+# ============================================================================
+# Agent (LangGraph + hosted Claude) Configuration
+# ============================================================================
+
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+# Haiku: fast/cheap, well-suited to tool-selection-style reasoning rather than
+# long-form generation. Override via env var to try a larger model.
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+
+# ============================================================================
+# Agent (LangGraph + local llama.cpp) Configuration
+# ============================================================================
+
+# llama-server's OpenAI-compatible endpoint. Same code works unmodified on a
+# machine with more RAM/VRAM - just point this at wherever llama-server is
+# running there (and start it with -ngl N for GPU offload on that machine).
+LLAMACPP_BASE_URL = os.environ.get("LLAMACPP_BASE_URL", "http://localhost:8080/v1")
+# llama-server ignores the "model" field and just serves whatever GGUF it
+# loaded at startup - this is only a label for logging/the API request shape.
+LLAMACPP_MODEL_LABEL = os.environ.get("LLAMACPP_MODEL_LABEL", "qwen2.5-1.5b-instruct")

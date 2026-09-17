@@ -45,3 +45,8 @@ sentence-transformers
 
 # Vector database
 qdrant-client
+
+# Agent framework
+langgraph
+langchain-anthropic
+langchain-openai  # also used as the client for a local llama-server (OpenAI-compatible API)
