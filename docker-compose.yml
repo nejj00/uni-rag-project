@@ -14,5 +14,32 @@ services:
       timeout: 5s
       retries: 5
 
+  api:
+    build:
+      context: ./part_2
+    # host.docker.internal + extra_hosts was tried first, so this container
+    # could reach llama-server running natively on the host - it didn't work
+    # here because ufw is active with no allow rules, blocking the docker
+    # bridge network's traffic to the host outright (confirmed empirically:
+    # host.docker.internal even resolved to the wrong bridge gateway for this
+    # compose network). network_mode: host sidesteps the whole bridge/firewall
+    # boundary - the container shares the host's network stack directly, so
+    # "localhost" here really is the host's localhost, same as bare local dev.
+    network_mode: host
+    volumes:
+      # Reuse the host's HuggingFace cache so the embedding model doesn't
+      # get re-downloaded every time this container is rebuilt/recreated
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      # python:3.12-slim has no curl either - same lesson as qdrant above
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s  # loading the embedding model + checking collections takes a while
+
 volumes:
   qdrant_storage:

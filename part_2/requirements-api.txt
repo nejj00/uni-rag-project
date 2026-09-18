@@ -1,0 +1,11 @@
+# Lean dependency set for the containerized API - deliberately not the
+# repo-root requirements.txt, which pulls in CUDA torch, bitsandbytes,
+# jupyter, and other dev-only tooling this service never touches.
+fastapi
+uvicorn[standard]
+qdrant-client
+sentence-transformers
+datasets
+huggingface_hub
+langgraph
+langchain-openai

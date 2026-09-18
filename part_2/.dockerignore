@@ -1,0 +1,9 @@
+# The API only needs inputs/anthology_sample.parquet (small, cached sample).
+# These two are the full-corpus/raw-download artifacts - huge and unused by
+# api.py, excluding them keeps the build context/image small.
+inputs/acl_anthology_full.parquet
+inputs/inputs.zip
+
+results/
+__pycache__/
+*.pyc
